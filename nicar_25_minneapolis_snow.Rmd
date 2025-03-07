@@ -1,0 +1,204 @@
+---
+title: "Minneapolis snow complaint response
+output: html_notebook
+---
+
+
+```{r}
+library(dplyr,warn.conflicts = FALSE)
+library(tidyr)
+library(tidyverse) 
+library(ggplot2)
+library(lubridate)
+library(readr)
+library(ggmap)
+library(sf)
+library(viridis)
+library(tigris)
+library(readxl)
+library(knitr)
+```
+
+
+```{r}
+complaints_311 <- read_excel('nicar25_311_data.xlsx')
+```
+
+```{r}
+##look at the datatypes
+str(complaints_311)
+```
+
+```{r}
+head(complaints_311)
+```
+
+
+```{r}
+#count the different TYPENAME entries, first convert to Dataframe
+typename <- as.data.frame(complaints_311$TYPENAME)
+nrow(typename)
+n_distinct(typename)
+
+
+```
+
+
+```{r}
+#count the times each TYPENAME appears in the set
+
+typename %>%
+  dplyr::select(complaint_name=`complaints_311$TYPENAME`) %>%
+  group_by(complaint_name) %>% 
+  summarize(count=n()) %>% 
+  arrange(-count)
+```
+```{r}
+#filter sidewalk related snow complaints 
+
+snow_rows <- c('Snow & Ice Complaint', 'Sidewalk Snow Ice - Open311', 'Sidewalk Snow and Ice - SS', 'Sidewalk Snow & Ice Complaint', 'Sidewalk Snow and Ice - SS City') 
+
+```
+
+```{r}
+#narrow to sidewalk, snow and ice complaints
+snow_sidewalk_complaints <- complaints_311 %>%
+  filter(TYPENAME %in% snow_rows)
+
+str(snow_sidewalk_complaints)
+```
+
+```{r}
+#There are 16,768 sidewalk snow complaints and more than 15k are without a community
+nrow(snow_sidewalk_complaints)
+
+snow_sidewalk_complaints %>% 
+  dplyr::select(community) %>% 
+  group_by(community) %>% 
+  summarize(count=n()) %>% 
+  arrange(-count)
+
+```
+
+```{r}
+#to prepare for analysis, we need to convert the OPENEDDATETIME and CLOSEDDATETIME to 
+snow_sidewalk_complaints$opened <- ymd_hms(snow_sidewalk_complaints$OPENEDDATETIME)
+snow_sidewalk_complaints$closed <- ymd_hms(snow_sidewalk_complaints$CLOSEDDATETIME)
+
+```
+
+```{r}
+#calculate the difference in response times per request
+snow_sidewalk_complaints$response_diff <- (snow_sidewalk_complaints$closed - snow_sidewalk_complaints$opened)
+
+```
+
+```{r}
+#the longest response time in the set took 195 days.
+longest_response <- sort(snow_sidewalk_complaints$response_diff,decreasing=TRUE)[1]
+seconds_to_period(longest_response)
+```
+
+```{r}
+#filter snow_sidewalk_complaints by rows with community and without
+
+none_rows <- snow_sidewalk_complaints %>%
+  filter(community == "none")
+
+community_rows <- snow_sidewalk_complaints %>%
+  filter(community != "none")
+```
+
+```{r}
+# Determine how many rows to sample from each group
+num_community_rows = min(length(community_rows), 1000)
+num_none_rows = 2000 - num_community_rows  # The remaining rows come from the 'none' group
+
+```
+
+
+```{r}
+#sample the data
+sampled_community <- sample_n(community_rows,num_community_rows)
+sampled_none <- sample_n(none_rows,num_none_rows)
+
+snow_sample <- sample(rbind(sampled_community,sampled_none))
+
+```
+
+```{r}
+
+#import the shapefiles
+
+#start building the snow map by importing city shapefiles
+
+minneapolis_communities <- st_read('minneapolis_comm/')
+communities <- minneapolis_communities['CommName']
+
+
+```
+
+```{r}
+#create map data
+
+data <- snow_sample %>%
+  dplyr::select(X=XCOORD,Y=YCOORD,response_diff)
+
+data_sf <- st_as_sf(data, coords = c("X", "Y"), crs = 3857) %>%
+  st_transform(crs=st_crs(communities, crs = 3857))
+
+sf::sf_use_s2(FALSE)
+
+
+points_in <- st_join(communities, data_sf, left=T)
+
+```
+
+```{r}
+#group by community area
+
+median_response_comm <- points_in %>% 
+  na.omit() %>% 
+  group_by(CommName) %>% 
+  summarize(median_response=median(response_diff))
+
+median_response_comm$median_response <- seconds_to_period(median_response_comm$median_response)
+
+#convert to numeric so that the map processes
+
+median_response_comm$median_response <- as.numeric(median_response_comm$median_response)
+
+```
+
+
+```{r}
+#map it out
+  ggplot(median_response_comm) +
+  geom_sf(aes(fill=median_response)) +
+  scale_fill_viridis(option="mako", direction=-1) +
+    labs(title = "Sidewalk snow complaint response time",
+       subtitle = "From Jan. 2023 to Sept. 2024",
+       caption = "Source: City of Minneapolis",
+       fill = "Median seconds to close snow complaints") +
+  theme_void()
+```
+
+```{r}
+#reintroduce days, hours,seconds
+median_response_comm$median_response <- seconds_to_period(median_response_comm$median_response)
+#drop geometry
+median_response_comm <- st_drop_geometry(median_response_comm)
+#prepare for table
+median_response_comm <- median_response_comm %>% 
+  arrange(-median_response) %>%
+  ungroup() %>% 
+  dplyr::select(CommName,median_response)
+
+
+```
+
+```{r}
+kable(median_response_comm, caption="Median time to close snow complaint")
+```
+
+
